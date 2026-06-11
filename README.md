@@ -54,6 +54,32 @@ Useful options: `--temp-offset N` to correct the absolute °C, `--temp-scale
 · `h` HUD · `n` swap bands · `g` temporal smoothing · `e/w` fullscreen on/off ·
 `r/t` record/stop · `p` snapshot · `[`/`]` temperature-offset calibration · `q`/ESC quit
 
+### Feed it to other apps (MJPEG bridge)
+
+`src/thermal_bridge.py` re-serves the parsed, colormapped thermal image as an
+MJPEG-over-HTTP stream, so any app can consume it like a webcam — no kernel
+module, no root, no dependency:
+
+```bash
+python3 src/thermal_bridge.py --colormap inferno --rotate 90   # serves http://127.0.0.1:8090
+```
+
+```python
+import cv2
+cap = cv2.VideoCapture("http://127.0.0.1:8090/stream.mjpg")    # OpenCV, ffmpeg, browsers, ...
+```
+
+Options mirror the viewer (`--colormap`, `--rotate`, `--flip`, `--width/--height`,
+`--temp-scale`, `--device`, …). Open `http://127.0.0.1:8090/` in a browser for a
+live preview.
+
+### Orientation
+
+The sensor is landscape (4:3). Rotate/mirror in software with `--rotate
+{0,90,180,270}` and `--flip {none,h,v}`, or live with the `o` key. (The InfiRay
+sensor also has a hardware mirror/flip, reachable only via the vendor command
+protocol — software rotation is simpler.)
+
 ### Camera support
 
 | Camera | Image | Temperature |

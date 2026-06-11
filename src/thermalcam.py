@@ -288,6 +288,8 @@ class ThermalApp:
         self.swap = args.swap_halves
         self.smooth = args.smooth
         self._ema = None
+        self.rotate = args.rotate     # 0/90/180/270
+        self.flip = args.flip         # none/h/v
 
         self.temp_scale = None        # raw-units-per-Kelvin, or None for relative
         self.temp_order = args.temp_order
@@ -440,19 +442,36 @@ class ThermalApp:
             luma = np.clip((luma - lo) * (255.0 / span), 0, 255)
         return luma.astype(np.uint8)
 
+    def _orient(self, arr):
+        """Apply the current rotation/flip to an image or temperature array."""
+        if arr is None:
+            return None
+        if self.rotate == 90:
+            arr = cv2.rotate(arr, cv2.ROTATE_90_CLOCKWISE)
+        elif self.rotate == 180:
+            arr = cv2.rotate(arr, cv2.ROTATE_180)
+        elif self.rotate == 270:
+            arr = cv2.rotate(arr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        if self.flip == "h":
+            arr = cv2.flip(arr, 1)
+        elif self.flip == "v":
+            arr = cv2.flip(arr, 0)
+        return arr
+
     def render(self, raw):
         frame = parse_frame(raw, self.temp_scale, self.temp_order, self.swap)
         if not frame.valid:
             return None      # desynced/garbage frame - caller reuses the last one
         is_real = frame.is_real
+        image = self._orient(frame.image)
         if is_real:
-            temp_map = frame.temp + self.temp_offset
+            temp_map = self._orient(frame.temp) + self.temp_offset
             unit = "C"
         else:
-            temp_map = self.args.rel_gain * frame.image + self.args.rel_offset
+            temp_map = self.args.rel_gain * image + self.args.rel_offset
             unit = "lvl"
 
-        h, w = frame.h, frame.w
+        h, w = image.shape
         center = temp_map[h // 2, w // 2]
         inner = temp_map[2:-2, 2:-2]
         max_pos = tuple(p + 2 for p in np.unravel_index(np.argmax(inner), inner.shape))
@@ -460,7 +479,7 @@ class ThermalApp:
         tmax, tmin = float(temp_map[max_pos]), float(temp_map[min_pos])
         tavg = float(temp_map.mean())
 
-        luma = self._display_luma(frame.image)
+        luma = self._display_luma(image)
         luma = cv2.convertScaleAbs(luma, alpha=self.alpha)
         new_w, new_h = w * self.scale, h * self.scale
         luma = cv2.resize(luma, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
@@ -475,6 +494,22 @@ class ThermalApp:
         if self.hud:
             self._draw_hud(heatmap, cmap_name, tavg, unit, is_real)
         return heatmap
+
+    def colormap_frame(self, raw):
+        """A clean colormapped BGR frame (oriented, no crosshair/HUD/markers),
+        for feeding other apps. Returns None for a desynced frame."""
+        frame = parse_frame(raw, self.temp_scale, self.temp_order, self.swap)
+        if not frame.valid:
+            return None
+        image = self._orient(frame.image)
+        luma = self._display_luma(image)
+        luma = cv2.convertScaleAbs(luma, alpha=self.alpha)
+        nw, nh = image.shape[1] * self.scale, image.shape[0] * self.scale
+        luma = cv2.resize(luma, (nw, nh), interpolation=cv2.INTER_CUBIC)
+        if self.blur > 0:
+            luma = cv2.blur(luma, (self.blur, self.blur))
+        cmap, _ = COLORMAPS[self.colormap]
+        return cv2.applyColorMap(luma, cmap)
 
     def _draw_crosshair(self, img, w, h, center_temp, unit):
         cx, cy = w // 2, h // 2
@@ -590,6 +625,8 @@ class ThermalApp:
             self.swap = not self.swap
         elif key == ord("g"):
             self.smooth = 0.0 if self.smooth > 0 else (self.args.smooth or 0.5)
+        elif key == ord("o"):  # cycle rotation 0->90->180->270
+            self.rotate = (self.rotate + 90) % 360
         elif key == ord("w"):
             self._set_fullscreen(False)
         elif key == ord("e"):
@@ -637,7 +674,7 @@ class ThermalApp:
             "  d/c  scale +/-       f/v  contrast +/-\n"
             "  m    cycle colormap  h    toggle HUD\n"
             "  n    swap bands      g    toggle temporal smoothing\n"
-            "  e/w  fullscreen on/off\n"
+            "  o    rotate 90 deg   e/w  fullscreen on/off\n"
             "  r/t  record / stop   p    snapshot\n"
             "  [/]  temperature offset (or relative gain) calibration\n"
             "  q/ESC quit\n"
@@ -691,6 +728,9 @@ def parse_args(argv=None):
     p.add_argument("--no-destripe", action="store_true", help="Disable fixed-pattern-noise removal.")
     p.add_argument("--smooth", type=float, default=0.5, help="Temporal smoothing 0.0-0.9 (0 disables). Live: 'g'.")
     p.add_argument("--swap-halves", action="store_true", help="Swap which band is image vs data. Live: 'n'.")
+    p.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270],
+                   help="Rotate the image clockwise. Live: cycle with 'o'.")
+    p.add_argument("--flip", default="none", choices=["none", "h", "v"], help="Mirror the image horizontally/vertically.")
     p.add_argument("--selftest", type=int, metavar="N", help="Headless: grab N frames, save a snapshot, exit.")
     return p.parse_args(argv)
 
