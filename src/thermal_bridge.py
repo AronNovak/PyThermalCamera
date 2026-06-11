@@ -35,16 +35,21 @@ _stop = threading.Event()
 
 
 def capture_loop(app, out_size, quality):
-    """Grab frames, colormap them, publish the newest JPEG. Skips desynced frames."""
+    """Grab frames, colormap them, publish the newest JPEG. Skips desynced/tiled
+    frames, and reopens the camera if the stream wedges into a stuck desync."""
     encode = [cv2.IMWRITE_JPEG_QUALITY, quality]
+    skips = 0
     while not _stop.is_set():
         ok, frame = app.cap.read()
         raw = app._as_raw(frame) if ok else None
-        if raw is None:
+        bgr = app.colormap_frame(raw) if raw is not None else None
+        if bgr is None:               # bad frame; keep serving the previous one
+            skips += 1
+            if skips % 60 == 0:       # ~2-4 s of nothing usable -> recover
+                print(f"[bridge] {skips} unusable frames, reopening camera...", flush=True)
+                app.reopen()
             continue
-        bgr = app.colormap_frame(raw)
-        if bgr is None:               # desynced frame; keep the previous one
-            continue
+        skips = 0
         if out_size is not None:
             bgr = cv2.resize(bgr, out_size, interpolation=cv2.INTER_AREA)
         ok, buf = cv2.imencode(".jpg", bgr, encode)
@@ -160,9 +165,9 @@ def main(argv=None):
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}"
-    print(f"Thermal MJPEG stream at {url}/stream.mjpg  (preview: {url}/  snapshot: {url}/snapshot.jpg)")
-    print("Open it from any app, e.g.:")
-    print(f"  python3 -c \"import cv2; c=cv2.VideoCapture('{url}/stream.mjpg'); print(c.read()[0])\"")
+    print(f"Thermal MJPEG stream at {url}/stream.mjpg  (preview: {url}/  snapshot: {url}/snapshot.jpg)", flush=True)
+    print("Open it from any app, e.g.:", flush=True)
+    print(f"  python3 -c \"import cv2; c=cv2.VideoCapture('{url}/stream.mjpg'); print(c.read()[0])\"", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

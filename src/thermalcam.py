@@ -218,6 +218,27 @@ def _plausible(temp):
     return garbage < 0.02
 
 
+def _image_aligned(luma):
+    """False if the image band looks horizontally tiled - the signature of a
+    desynced frame whose line stride is wrong (content repeats at width/4 or /2).
+
+    Tested by mean-absolute-difference against a shifted copy: tiled panels are
+    near-identical (diff ~0), whereas a normal scene - even a smooth left-to-right
+    temperature gradient - differs substantially when shifted. Flat/near-uniform
+    scenes are exempt."""
+    s = float(luma.std())
+    if s < 8.0:                          # too uniform to judge; treat as fine
+        return True
+    w = luma.shape[1]
+    for period in (w // 4, w // 2):
+        if period < 2:
+            continue
+        diff = float(np.abs(luma[:, period:] - luma[:, :-period]).mean())
+        if diff < max(3.0, 0.12 * s):    # panels ~identical at this period => tiled
+            return False
+    return True
+
+
 def _decode_temp(raw, temp_rows, sensor, scale, order):
     """Decode a temperature band into a sensor-resolution °C array, or None."""
     t0, t1 = temp_rows
@@ -242,6 +263,8 @@ def parse_frame(raw, scale=None, order="le", swap=False):
             temp_rows, image_rows = image_rows, temp_rows
         i0, i1 = image_rows
         image = raw[i0:i1, :, 0].astype(np.float32)
+        if not _image_aligned(image):
+            return Frame(image, None, False, valid=False)
         temp = _decode_temp(raw, temp_rows, sensor, scale or def_scale, order or def_order)
         if temp is None:
             # Known radiometric layout but bad data this frame -> skip it.
@@ -388,6 +411,8 @@ class ThermalApp:
             sys.exit(f"{device}: no usable YUYV mode. Try --resolution 256x192.")
 
         self.cap, raw, self.temp_scale, self.temp_order = pick
+        self._device = device
+        self._wh = (raw.shape[1], raw.shape[0])   # for reopen() after a desync
         self.radiometric = self.temp_scale is not None
         if not self.radiometric:
             self.temp_scale = None
@@ -403,6 +428,19 @@ class ThermalApp:
                   f"offset={self.temp_offset:+.1f} °C (adjust with [ and ])")
         else:
             print("  no 16-bit data in this stream - see docs/TC002C-DUO.md")
+
+    def reopen(self):
+        """Reopen the camera at the same resolution to recover from a stuck
+        desync (the stream can wedge into a misaligned state)."""
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+        cap, _raw = self._open_at(self._device, *self._wh)
+        if cap is not None:
+            self.cap = cap
+            return True
+        return False
 
     @staticmethod
     def _as_raw(frame):
