@@ -1,0 +1,7 @@
+# Core viewer (src/thermalcam.py)
+opencv-python>=4.5
+numpy>=1.20
+
+# Only for the experimental radiometric-unlock work (src/thermal_protocol.py).
+# Not needed for the viewer.
+# pyusb>=1.2

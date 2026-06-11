@@ -6,6 +6,62 @@ https://www.eevblog.com/forum/thermal-imaging/infiray-and-their-p2-pro-discussio
 Check out Leo's Github here: https://github.com/LeoDJ/P2Pro-Viewer/tree/main
 
 
+## Universal viewer — `src/thermalcam.py`
+
+The original program (`src/tc001v4.2.py`, below) is hard-coded for the **Topdon
+TC001** frame format. `src/thermalcam.py` is a camera-agnostic rewrite that also
+works with newer Topdon / InfiRay models such as the **TC002C Duo**, which expose
+a different USB frame geometry.
+
+What it adds:
+
+- **Auto-detects** the thermal camera on the USB bus — no `--device` needed.
+- **Auto-detects the frame geometry** instead of assuming `256x384`, so it
+  handles the TC001 (`256x384`) and the TC002C Duo family (`256x392`, …).
+- **Real error handling** (the original has none).
+- **Real temperatures.** It auto-detects the camera's radiometric mode and
+  decodes true °C — the TC001 at `256x384` and the **TC002C Duo at `512x484`**
+  (which also gives a crisp 512×384 image). Cameras with no 16-bit mode fall back
+  to a clearly-labelled *relative* scale. The absolute reading can be offset-
+  calibrated with `--temp-offset` / the `[` `]` keys. See `docs/TC002C-DUO.md`.
+- Same niceties: colormaps, HUD, recording, snapshots, scaling, blur, contrast,
+  hot/cold spot tracking — plus fixed-pattern-noise removal and a contrast stretch
+  for cameras that don't pre-AGC their preview.
+
+### Install
+
+```bash
+sudo apt-get install python3-opencv        # Debian/Ubuntu/Raspberry Pi
+# or:  pip install -r requirements.txt
+```
+
+### Run
+
+```bash
+python3 src/thermalcam.py                   # auto-detect everything
+python3 src/thermalcam.py --device /dev/video2
+python3 src/thermalcam.py --resolution 256x384   # e.g. force TC001 radiometric mode
+python3 src/thermalcam.py --selftest 20     # headless: save a snapshot + diagnostics, no GUI
+```
+
+Useful options: `--temp-offset N` to correct the absolute °C, `--temp-scale
+{auto,64,16}` / `--temp-order {le,be}` to force a radiometric decode,
+`--no-stretch` / `--no-destripe` / `--smooth` for the image cleanups.
+
+### Keys
+
+`a/z` blur · `s/x` min-max threshold · `d/c` scale · `f/v` contrast · `m` colormap
+· `h` HUD · `n` swap bands · `g` temporal smoothing · `e/w` fullscreen on/off ·
+`r/t` record/stop · `p` snapshot · `[`/`]` temperature-offset calibration · `q`/ESC quit
+
+### Camera support
+
+| Camera | Image | Temperature |
+|--------|-------|-------------|
+| Topdon TC001 | ✅ | ✅ real °C (`256x384`, /64) |
+| Topdon TC002C Duo | ✅ hi-res 512×384 | ✅ real °C (`512x484`, /16; offset-calibratable) |
+| Other InfiRay UVC | ✅ likely | auto-detected if a radiometric mode is present |
+
 
 ## Introduction
 
