@@ -143,7 +143,9 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--host", default="127.0.0.1", help="Bind address (0.0.0.0 to expose on the LAN).")
     p.add_argument("--port", type=int, default=8090)
-    p.add_argument("--colormap", default="inferno", help="Palette (jet, inferno, hot, ...). Default inferno.")
+    p.add_argument("--colormap", default="white_hot",
+                   help="Palette (white_hot, black_hot, inferno, jet, ...). Default white_hot - "
+                        "grayscale gives detectors far fewer false positives on empty scenes.")
     p.add_argument("--width", type=int, help="Output width (default: camera native).")
     p.add_argument("--height", type=int, help="Output height (default: camera native).")
     p.add_argument("--quality", type=int, default=85, help="JPEG quality 1-100.")

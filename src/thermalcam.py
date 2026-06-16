@@ -38,6 +38,14 @@ except ImportError as exc:  # pragma: no cover - environment guard
         "  pip install opencv-python numpy        (everything else)"
     )
 
+# TC002C Duo true-temperature decode (its own self-calibrating stream + bundled
+# calibration LUTs). Optional: the viewer still runs without it on other cameras.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from radiometry import duo as _duo
+except Exception:  # pragma: no cover - radiometry is optional
+    _duo = None
+
 # USB vendor IDs known to ship InfiRay-based thermal cameras. 0x2BDF is Topdon.
 KNOWN_THERMAL_VIDS = {0x2BDF, 0x0BDA, 0x1514, 0x3474}
 
@@ -51,21 +59,40 @@ KNOWN_LAYOUTS = {
     (256, 384): ((192, 384), (0, 192), (256, 192), 64.0, "le"),   # TC001 / P2 family
     (512, 484): ((0, 96), (98, 482), (256, 192), 16.0, "le"),     # TC002C Duo
 }
-# Resolutions to try for genuine temperature data, in order of preference.
-RADIOMETRIC_MODES = [(256, 384), (512, 484)]
+# The TC002C Duo's true-°C mode: the camera advertises it as the bogus-looking
+# "8x12578" (= 100624 u16 = 201248 B), a header+temperature+image frame the firmware
+# self-calibrates. Decoded by radiometry/duo.py (real °C, no per-unit calibration).
+DUO_MODE = (8, 12578)
+# Resolutions to try for genuine temperature data, in order of preference. The Duo's
+# self-calibrating mode (real absolute °C) is preferred over the 512x484 linear band.
+RADIOMETRIC_MODES = ([DUO_MODE] if _duo is not None else []) + [(256, 384), (512, 484)]
 # Plain image modes (no temperature), used only if no radiometric mode works.
 IMAGE_MODES = [(512, 384), (256, 392), (256, 192)]
 
+# (cv2 colormap or None for the grayscale white/black-hot pseudo-palettes), name.
+# white-hot is first (the default): on flat/noisy scenes a colour map turns sensor
+# noise into person-shaped blobs that fool detectors, while grayscale stays clean.
 COLORMAPS = [
-    (cv2.COLORMAP_JET, "Jet"),
-    (cv2.COLORMAP_INFERNO, "Inferno"),
-    (cv2.COLORMAP_HOT, "Hot"),
-    (cv2.COLORMAP_MAGMA, "Magma"),
-    (cv2.COLORMAP_PLASMA, "Plasma"),
-    (cv2.COLORMAP_BONE, "Bone"),
-    (cv2.COLORMAP_VIRIDIS, "Viridis"),
-    (cv2.COLORMAP_RAINBOW, "Rainbow"),
+    (None, "white_hot"),
+    (None, "black_hot"),
+    (cv2.COLORMAP_INFERNO, "inferno"),
+    (cv2.COLORMAP_JET, "jet"),
+    (cv2.COLORMAP_HOT, "ironbow"),
+    (cv2.COLORMAP_MAGMA, "magma"),
+    (cv2.COLORMAP_VIRIDIS, "viridis"),
+    (cv2.COLORMAP_BONE, "bone"),
 ]
+
+
+def apply_palette(luma, idx):
+    """Colormap an 8-bit luma image; returns (bgr, name). Handles the grayscale
+    white-hot / black-hot pseudo-palettes (no cv2 colormap)."""
+    cmap, name = COLORMAPS[idx]
+    if cmap is None:
+        if name == "black_hot":
+            luma = 255 - luma
+        return cv2.cvtColor(luma, cv2.COLOR_GRAY2BGR), name
+    return cv2.applyColorMap(luma, cmap), name
 
 
 def is_raspberrypi():
@@ -253,8 +280,26 @@ def _decode_temp(raw, temp_rows, sensor, scale, order):
     return temp if _plausible(temp) else None
 
 
+def _parse_duo(raw):
+    """Decode a TC002C Duo radiometric frame (the 8x12578 mode) into a Frame.
+
+    The temperature plane carries the thermal scene (real °C from the firmware's
+    self-calibrating decode); the raw display-image plane is unpopulated over plain
+    UVC, so the temperature field doubles as the display source.
+    """
+    u16 = np.frombuffer(np.ascontiguousarray(raw).tobytes(), dtype="<u2")
+    _header, temp_raw, _image = _duo.split_frame(u16)
+    temp = _duo.apparent_celsius(temp_raw)            # real apparent °C, auto Vtemp index
+    if not _plausible(temp):
+        return Frame(temp.astype(np.float32), None, False, valid=False)
+    return Frame(temp.astype(np.float32), temp, True)
+
+
 def parse_frame(raw, scale=None, order="le", swap=False):
     """Decode a raw YUYV frame into a Frame (image + optional temperature)."""
+    if _duo is not None and raw.size >= _duo.FRAME_U16 * 2 and _duo.is_duo_frame(
+            np.frombuffer(np.ascontiguousarray(raw).tobytes(), dtype="<u2")):
+        return _parse_duo(raw)
     h, w, _ = raw.shape
     layout = KNOWN_LAYOUTS.get((w, h))
     if layout is not None:
@@ -318,6 +363,7 @@ class ThermalApp:
         self.temp_order = args.temp_order
         self.temp_offset = args.temp_offset
         self.radiometric = False
+        self.is_duo = False
 
         self.cap = None
         self.native_w = self.native_h = 0
@@ -393,7 +439,10 @@ class ThermalApp:
                 cap, raw = self._open_at(device, w, h)
                 if cap is None:
                     continue
-                scale = forced_scale if forced else KNOWN_LAYOUTS[(w, h)][3]
+                if (w, h) == DUO_MODE:
+                    scale = "duo"                       # LUT-based decode, real °C
+                else:
+                    scale = forced_scale if forced else KNOWN_LAYOUTS[(w, h)][3]
                 if self._probe_radiometric(cap, raw, scale):
                     pick = (cap, raw, scale, self.temp_order)
                     break
@@ -413,17 +462,21 @@ class ThermalApp:
         self.cap, raw, self.temp_scale, self.temp_order = pick
         self._device = device
         self._wh = (raw.shape[1], raw.shape[0])   # for reopen() after a desync
-        self.radiometric = self.temp_scale is not None
+        frame = parse_frame(raw, self.temp_scale, self.temp_order, self.swap)
+        self.is_duo = self.temp_scale == "duo"
+        self.radiometric = self.temp_scale is not None or frame.is_real
         if not self.radiometric:
             self.temp_scale = None
-        frame = parse_frame(raw, self.temp_scale, self.temp_order, self.swap)
         self.native_h, self.native_w = frame.h, frame.w
         if not self.args.scale:                       # auto: aim for ~768px wide
             self.scale = max(1, min(5, round(768 / self.native_w)))
         print(f"Opened {device}: frame {raw.shape[1]}x{raw.shape[0]}, "
               f"image {self.native_w}x{self.native_h}, "
               f"temperature={'REAL °C' if self.radiometric else 'relative (uncalibrated)'}")
-        if self.radiometric:
+        if self.is_duo:
+            print(f"  radiometric: TC002C Duo self-calibrating decode (real °C), "
+                  f"offset={self.temp_offset:+.1f} °C (adjust with [ and ])")
+        elif self.radiometric:
             print(f"  radiometric: scale=1/{self.temp_scale:g} K, order={self.temp_order}, "
                   f"offset={self.temp_offset:+.1f} °C (adjust with [ and ])")
         else:
@@ -524,8 +577,7 @@ class ThermalApp:
         if self.blur > 0:
             luma = cv2.blur(luma, (self.blur, self.blur))
 
-        cmap, cmap_name = COLORMAPS[self.colormap]
-        heatmap = cv2.applyColorMap(luma, cmap)
+        heatmap, cmap_name = apply_palette(luma, self.colormap)
 
         self._draw_crosshair(heatmap, new_w, new_h, center, unit)
         self._draw_markers(heatmap, max_pos, min_pos, tmax, tmin, tavg, unit, w, h, new_w, new_h)
@@ -546,8 +598,7 @@ class ThermalApp:
         luma = cv2.resize(luma, (nw, nh), interpolation=cv2.INTER_CUBIC)
         if self.blur > 0:
             luma = cv2.blur(luma, (self.blur, self.blur))
-        cmap, _ = COLORMAPS[self.colormap]
-        return cv2.applyColorMap(luma, cmap)
+        return apply_palette(luma, self.colormap)[0]
 
     def _draw_crosshair(self, img, w, h, center_temp, unit):
         cx, cy = w // 2, h // 2
